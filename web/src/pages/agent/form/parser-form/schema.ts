@@ -1,6 +1,11 @@
 import { FileType } from '@/constants/file';
 import i18n from '@/locales/config';
 import { z } from 'zod';
+import { HyperlinkLimits } from '../../constant/pipeline';
+
+// One message for every budget field, as the page-range checks do: the
+// allowed range differs per field and the input's min/max already shows it.
+const hyperlinkBudgetMessage = i18n.t('flow.hyperlinkBudgetInvalid');
 
 export const SetupSchema = z
   .object({
@@ -28,6 +33,35 @@ export const SetupSchema = z
     enable_multi_column: z.boolean().optional(),
     remove_toc: z.boolean().optional(),
     remove_header_footer: z.boolean().optional(),
+    // Opt-in linked-content ingestion (#21032). Present on pdf, docx and
+    // markdown only; collect_markdown_links is markdown-only. Budget bounds
+    // mirror the backend HyperlinkFetchParam.Validate ranges.
+    fetch_links: z.boolean().optional(),
+    collect_markdown_links: z.boolean().optional(),
+    max_urls: z.coerce
+      .number()
+      .int(hyperlinkBudgetMessage)
+      .min(1, hyperlinkBudgetMessage)
+      .max(HyperlinkLimits.maxUrls, hyperlinkBudgetMessage)
+      .optional(),
+    max_bytes_per_url: z.coerce
+      .number()
+      .int(hyperlinkBudgetMessage)
+      .min(1, hyperlinkBudgetMessage)
+      .max(HyperlinkLimits.maxBytesPerUrl, hyperlinkBudgetMessage)
+      .optional(),
+    max_total_bytes: z.coerce
+      .number()
+      .int(hyperlinkBudgetMessage)
+      .min(1, hyperlinkBudgetMessage)
+      .max(HyperlinkLimits.maxTotalBytes, hyperlinkBudgetMessage)
+      .optional(),
+    timeout_s: z.coerce
+      .number()
+      .int(hyperlinkBudgetMessage)
+      .min(1, hyperlinkBudgetMessage)
+      .max(HyperlinkLimits.timeoutSeconds, hyperlinkBudgetMessage)
+      .optional(),
     pages: z
       .array(
         z

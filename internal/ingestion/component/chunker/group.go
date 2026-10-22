@@ -325,6 +325,19 @@ func buildChunksFromRecordGroups(groups [][]lineRecord, prefixes []string, p *ti
 			chunkText = removeTag(g[0].text)
 		}
 		chunk := map[string]any{"text": chunkText}
+		// Item-level Extra (linked-content provenance among others) rides the
+		// chunk the way the General/Token paths re-emit ChunkDoc.Extra. A merged
+		// group spans several items, so each key is first-writer-wins; a
+		// heading-only leading record must not drop a body record's keys.
+		var extra map[string]json.RawMessage
+		for _, r := range g {
+			mergeExtraFirstWins(&extra, r.extra)
+		}
+		for key, value := range extra {
+			if _, exists := chunk[key]; !exists {
+				chunk[key] = value
+			}
+		}
 		if g[0].preserveOrder {
 			chunk["_preserve_order"] = true
 		}
@@ -622,22 +635,7 @@ func recordsFromStructured(items []schema.ChunkDoc) []lineRecord {
 				img := it.ImgID
 				imgID = &img
 			}
-			meta := make(map[string]any)
-			if it.ContentLtks != "" {
-				meta["content_ltks"] = it.ContentLtks
-			}
-			if it.ContentSmLtks != "" {
-				meta["content_sm_ltks"] = it.ContentSmLtks
-			}
-			if it.TitleTks != "" {
-				meta["title_tks"] = it.TitleTks
-			}
-			if it.TitleSmTks != "" {
-				meta["title_sm_tks"] = it.TitleSmTks
-			}
-			for k, v := range it.Extra {
-				meta[k] = json.RawMessage(v)
-			}
+			extra := cloneExtra(it.Extra)
 			out = append(out, lineRecord{
 				text:          recordText,
 				docType:       dt,
@@ -649,7 +647,7 @@ func recordsFromStructured(items []schema.ChunkDoc) []lineRecord {
 				preserveOrder: it.PreserveOrder,
 				sheet:         it.Sheet,
 				sheetIndex:    it.SheetIndex,
-				parentMeta:    meta,
+				extra:         extra,
 			})
 		}
 		// TextParser intentionally emits one coordinate-free text item for the

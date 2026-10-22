@@ -86,6 +86,59 @@ func TestBuildParserPageCapOverride(t *testing.T) {
 	}
 }
 
+// The debug run's parser_config merges over the DSL params with override-wins on
+// the top-level key, and a parser family is a top-level key, so the injection
+// must carry the authored family settings forward — otherwise a markdown
+// document's linked-content switches never reach the Parser (#21032).
+func TestBuildParserPageCapOverrideKeepsDSLFamilySettings(t *testing.T) {
+	familyOf := func(ext string) string { return ext }
+	dsl := envelopedDSL(`{"Parser:Abc": {"obj": {"component_name": "Parser", "params": {
+		"markdown": {"fetch_links": true, "collect_markdown_links": true, "max_urls": 7, "preprocess": ["main_content"]}
+	}}}}`)
+
+	out := BuildParserPageCapOverride(map[string]any{}, dsl, "markdown", 2, testParserComponentName, familyOf)
+	fam, ok := out["Parser:Abc"].(map[string]any)["markdown"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing cpnID/family entry: %#v", out)
+	}
+	for key, want := range map[string]any{
+		"fetch_links": true, "collect_markdown_links": true, "max_urls": float64(7),
+		"preprocess": []any{"main_content"},
+	} {
+		if !reflect.DeepEqual(fam[key], want) {
+			t.Errorf("%s = %#v, want %#v (authored setting lost to the page-cap injection)", key, fam[key], want)
+		}
+	}
+	if !reflect.DeepEqual(fam["pages"], []any{[]any{1, 2}}) {
+		t.Errorf("pages = %#v, want the debug cap", fam["pages"])
+	}
+
+	// An explicit ParserConfig value still beats the DSL's.
+	pc := map[string]any{"Parser:Abc": map[string]any{"markdown": map[string]any{"max_urls": 1}}}
+	merged := BuildParserPageCapOverride(pc, dsl, "markdown", 2, testParserComponentName, familyOf)
+	famMerged := merged["Parser:Abc"].(map[string]any)["markdown"].(map[string]any)
+	if famMerged["max_urls"] != 1 {
+		t.Errorf("max_urls = %#v, want the explicit ParserConfig value 1", famMerged["max_urls"])
+	}
+	if famMerged["fetch_links"] != true {
+		t.Errorf("fetch_links = %#v, want the DSL value preserved alongside it", famMerged["fetch_links"])
+	}
+
+	// A caller-supplied page cap is left alone, and the DSL's other settings are
+	// still carried forward next to it.
+	pcPages := map[string]any{"Parser:Abc": map[string]any{"markdown": map[string]any{
+		"pages": []any{[]any{3, 4}},
+	}}}
+	withPages := BuildParserPageCapOverride(pcPages, dsl, "markdown", 2, testParserComponentName, familyOf)
+	famPages := withPages["Parser:Abc"].(map[string]any)["markdown"].(map[string]any)
+	if !reflect.DeepEqual(famPages["pages"], []any{[]any{3, 4}}) {
+		t.Errorf("pages = %#v, want the caller's explicit cap preserved", famPages["pages"])
+	}
+	if famPages["fetch_links"] != true {
+		t.Errorf("fetch_links = %#v, want the DSL value carried next to an explicit cap", famPages["fetch_links"])
+	}
+}
+
 // TestUnwrapCanvasDSL verifies the envelope is stripped and a raw DSL passes
 // through unchanged; an empty/invalid payload errors.
 func TestUnwrapCanvasDSL(t *testing.T) {

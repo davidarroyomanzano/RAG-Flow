@@ -16,6 +16,53 @@
 
 package schema
 
+import (
+	"fmt"
+)
+
+// HyperlinkFetchParam is the per-family linked-content switch (#21032).
+// FetchLinks gates fetching; CollectMarkdownLinks (markdown only) gates
+// collecting section links, mirroring Python's analyze_hyperlink /
+// hyperlink_urls split. Budgets bound a single document's fetch.
+type HyperlinkFetchParam struct {
+	FetchLinks           bool `json:"fetch_links"`
+	CollectMarkdownLinks bool `json:"collect_markdown_links"`
+	MaxURLs              int  `json:"max_urls"`
+	MaxBytesPerURL       int  `json:"max_bytes_per_url"`
+	MaxTotalBytes        int  `json:"max_total_bytes"`
+	TimeoutSeconds       int  `json:"timeout_s"`
+}
+
+// Defaults returns the disabled-by-default hyperlink param.
+func (HyperlinkFetchParam) Defaults() HyperlinkFetchParam {
+	return HyperlinkFetchParam{
+		FetchLinks:           false,
+		CollectMarkdownLinks: false,
+		MaxURLs:              5,
+		MaxBytesPerURL:       1 << 20,
+		MaxTotalBytes:        5 << 20,
+		TimeoutSeconds:       10,
+	}
+}
+
+// Validate enforces ranges; a disabled param still validates its budgets
+// so a later enable cannot silently pick up nonsense.
+func (p *HyperlinkFetchParam) Validate() error {
+	if p.MaxURLs < 1 || p.MaxURLs > 50 {
+		return errInvalidValue{Field: "max_urls", Value: fmt.Sprintf("%d", p.MaxURLs)}
+	}
+	if p.MaxBytesPerURL < 1 || p.MaxBytesPerURL > 64<<20 {
+		return errInvalidValue{Field: "max_bytes_per_url", Value: fmt.Sprintf("%d", p.MaxBytesPerURL)}
+	}
+	if p.MaxTotalBytes < 1 || p.MaxTotalBytes > 256<<20 {
+		return errInvalidValue{Field: "max_total_bytes", Value: fmt.Sprintf("%d", p.MaxTotalBytes)}
+	}
+	if p.TimeoutSeconds < 1 || p.TimeoutSeconds > 120 {
+		return errInvalidValue{Field: "timeout_s", Value: fmt.Sprintf("%d", p.TimeoutSeconds)}
+	}
+	return nil
+}
+
 // ParserSetup is a per-filetype parser configuration block. The keys are heterogeneous (e.g.,
 // `parse_method`, `lang`, `output_format`, `suffix`, `fields`, `vlm`),
 // so a free-form map best mirrors the Python dict literal.

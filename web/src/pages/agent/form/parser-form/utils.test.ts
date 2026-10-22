@@ -1,11 +1,18 @@
 import { FileType } from '@/constants/file';
 import { ModelTypeToField } from '@/constants/llm';
-import { initialParserValues } from '../../constant/pipeline';
+import {
+  HyperlinkDefaultSetup,
+  initialParserValues,
+} from '../../constant/pipeline';
 import {
   buildInitialParserSetup,
   buildInitialParserValues,
   normalizeParserFormValues,
 } from './utils';
+
+// The numbers come from the same constant the form seeds, so a change there
+// cannot leave this expectation quietly stale.
+const HyperlinkDefaults = HyperlinkDefaultSetup;
 
 describe('parser-form utils', () => {
   describe('buildInitialParserSetup', () => {
@@ -105,7 +112,10 @@ describe('parser-form utils', () => {
         llm_id: 'gpt-4o@OpenAI',
         system_prompt: '',
       });
-      expect(values.setups[0]).toEqual({ fileFormat: FileType.PDF });
+      expect(values.setups[0]).toEqual({
+        fileFormat: FileType.PDF,
+        ...HyperlinkDefaults,
+      });
       // Audio keeps its per-setup ASR model.
       expect(values.setups[1]).toEqual({
         fileFormat: FileType.Audio,
@@ -159,11 +169,66 @@ describe('parser-form utils', () => {
         vlm: { llm_id: 'gpt-4o@OpenAI', system_prompt: '' },
         enable_vision_enhancement: true,
         setups: [
-          { fileFormat: FileType.PDF },
+          {
+            fileFormat: FileType.PDF,
+            ...HyperlinkDefaults,
+          },
           { fileFormat: FileType.Audio, vlm: { llm_id: 'whisper@OpenAI' } },
         ],
       });
       expect(normalizeParserFormValues(normalized)).toEqual(normalized);
+    });
+
+    it('materializes linked-content defaults on pdf, docx and markdown only', () => {
+      const normalized = normalizeParserFormValues({
+        setups: [
+          { fileFormat: FileType.PDF },
+          { fileFormat: FileType.Docx },
+          { fileFormat: FileType.TextMarkdown },
+          { fileFormat: FileType.Doc },
+        ],
+      });
+
+      expect(normalized.setups[0]).toEqual({
+        fileFormat: FileType.PDF,
+        ...HyperlinkDefaults,
+      });
+      expect(normalized.setups[1]).toEqual({
+        fileFormat: FileType.Docx,
+        ...HyperlinkDefaults,
+      });
+      // collect_markdown_links is markdown-only; the backend rejects it on
+      // the other families.
+      expect(normalized.setups[2]).toEqual({
+        fileFormat: FileType.TextMarkdown,
+        ...HyperlinkDefaults,
+        collect_markdown_links: false,
+      });
+      expect(normalized.setups[3]).toEqual({ fileFormat: FileType.Doc });
+    });
+
+    it('keeps explicit linked-content values instead of overwriting them', () => {
+      const normalized = normalizeParserFormValues({
+        setups: [
+          {
+            fileFormat: FileType.PDF,
+            fetch_links: true,
+            max_urls: 2,
+            max_bytes_per_url: 2048,
+            max_total_bytes: 4096,
+            timeout_s: 30,
+          },
+        ],
+      });
+
+      expect(normalized.setups[0]).toEqual({
+        fileFormat: FileType.PDF,
+        fetch_links: true,
+        max_urls: 2,
+        max_bytes_per_url: 2048,
+        max_total_bytes: 4096,
+        timeout_s: 30,
+      });
     });
 
     it('keeps an explicitly cleared top-level model', () => {
@@ -325,7 +390,10 @@ describe('parser-form utils', () => {
           },
         ],
       });
-      expect(normalized.setups[0]).toEqual({ fileFormat: FileType.PDF });
+      expect(normalized.setups[0]).toEqual({
+        fileFormat: FileType.PDF,
+        ...HyperlinkDefaultSetup,
+      });
       // Audio keeps its per-setup ASR model; only output_format goes.
       expect(normalized.setups[1]).toEqual({
         fileFormat: FileType.Audio,

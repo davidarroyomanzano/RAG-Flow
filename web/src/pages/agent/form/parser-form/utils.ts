@@ -5,6 +5,7 @@ import isEmpty from 'lodash/isEmpty';
 import omit from 'lodash/omit';
 import {
   FileTypeDefaultModelFieldMap,
+  HyperlinkDefaultSetup,
   initialParserValues,
 } from '../../constant/pipeline';
 
@@ -23,6 +24,36 @@ export const VisionEnhancementFileTypes: FileType[] = [
   FileType.TextMarkdown,
   FileType.Video,
 ];
+
+const HyperlinkSetupFileTypes = [
+  FileType.PDF,
+  FileType.Docx,
+  FileType.TextMarkdown,
+];
+
+// Materializes the linked-content defaults (#21032) on setups saved before
+// those keys existed. The backend applies the same defaults at parse time, so
+// this only makes the form show the budgets the run will actually use instead
+// of empty inputs. collect_markdown_links is markdown-only: the backend
+// rejects it on the other families.
+function materializeHyperlinkDefaults<T extends Record<string, any>>(
+  setup: T,
+): T {
+  if (!HyperlinkSetupFileTypes.includes(setup?.fileFormat)) {
+    return setup;
+  }
+  const defaults: Record<string, any> = { ...HyperlinkDefaultSetup };
+  if (setup.fileFormat === FileType.TextMarkdown) {
+    defaults.collect_markdown_links = false;
+  }
+  const next: Record<string, any> = { ...setup };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (next[key] === undefined) {
+      next[key] = value;
+    }
+  }
+  return next as T;
+}
 
 // Lifts the legacy per-setup vision options (vlm.llm_id / flatten_media_to_text)
 // onto the top level and migrates the image family onto its own contract:
@@ -81,7 +112,9 @@ export function normalizeParserFormValues<T extends Record<string, any>>(
     // a load/save round-trip.
     if (x?.fileFormat === FileType.Audio) return omit(x, ['output_format']);
     const stripped = omit(x, ['vlm', 'flatten_media_to_text', 'output_format']);
-    if (x?.fileFormat !== FileType.Image) return stripped;
+    if (x?.fileFormat !== FileType.Image) {
+      return materializeHyperlinkDefaults(stripped);
+    }
     const { parse_method, ...rest } = omit(stripped, ['lang', 'system_prompt']);
     // Materialize the switch either way. Absent or "ocr" both mean "run local
     // OCR", matching the backend's legacy inference, so the toggle can never

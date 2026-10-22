@@ -17,6 +17,7 @@
 package component
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -164,6 +165,37 @@ func TestParserComponent_Check(t *testing.T) {
 			name:   "only unrelated family → pass",
 			setups: map[string]schema.ParserSetup{"markdown": {"output_format": "json"}},
 		},
+		// --- linked-content ingestion (#21032): switches live under the
+		// families that own a collector, nowhere else ---
+		{
+			name:    "html carries fetch_links → rejected",
+			setups:  map[string]schema.ParserSetup{"html": {"fetch_links": true}},
+			wantErr: "html has no hyperlink parameter",
+		},
+		{
+			name:    "pdf carries collect_markdown_links → rejected",
+			setups:  map[string]schema.ParserSetup{"pdf": {"parse_method": "deepdoc", "collect_markdown_links": true}},
+			wantErr: "pdf has no hyperlink parameter",
+		},
+		{
+			name:    "pdf budget out of range → rejected",
+			setups:  map[string]schema.ParserSetup{"pdf": {"parse_method": "deepdoc", "fetch_links": true, "max_urls": 0}},
+			wantErr: "has invalid value",
+		},
+		{
+			name:    "pdf budget wrong type → rejected",
+			setups:  map[string]schema.ParserSetup{"pdf": {"parse_method": "deepdoc", "fetch_links": "yes"}},
+			wantErr: "has invalid value",
+		},
+		{
+			name:    "timeout_s true is not a number → rejected",
+			setups:  map[string]schema.ParserSetup{"docx": {"timeout_s": true}},
+			wantErr: "has invalid value",
+		},
+		{
+			name:   "markdown budgets in range → pass",
+			setups: map[string]schema.ParserSetup{"markdown": {"fetch_links": true, "collect_markdown_links": true, "max_urls": 5, "timeout_s": 10}},
+		},
 	}
 
 	for _, tc := range cases {
@@ -214,6 +246,24 @@ func TestParserComponent_New_RunsCheck(t *testing.T) {
 	}
 }
 
+// A hyperlink switch left at the params root never reaches a family setup, so it
+// must fail at compile time instead of doing nothing (#21032) — including the
+// map shape, which would otherwise be absorbed as a file-format family named
+// after the key.
+func TestNewParserComponentRejectsTopLevelHyperlinkKey(t *testing.T) {
+	for _, key := range []string{"fetch_links", "collect_markdown_links", "max_urls", "max_bytes_per_url", "max_total_bytes", "timeout_s"} {
+		for _, value := range []any{1, true, "5", map[string]any{"a": 1}, map[string]any{}} {
+			if _, err := NewParserComponent(map[string]any{key: value}); err == nil {
+				t.Errorf("NewParserComponent with top-level %q = %T: want error, got nil", key, value)
+			}
+		}
+	}
+	// An unrelated non-map key keeps the legacy lenient behaviour.
+	if _, err := NewParserComponent(map[string]any{"outputs": 1}); err != nil {
+		t.Errorf("NewParserComponent with unrelated scalar: want no error, got %v", err)
+	}
+}
+
 func TestNewParserComponentVisionEnhancementSetting(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -236,5 +286,28 @@ func TestNewParserComponentVisionEnhancementSetting(t *testing.T) {
 	}
 	if _, err := NewParserComponent(map[string]any{"enable_vision_enhancement": "true"}); err == nil || !strings.Contains(err.Error(), "must be a boolean") {
 		t.Fatalf("string switch error = %v, want boolean validation", err)
+	}
+}
+
+// The config path is as strict as the schema ranges: an integral JSON float
+// decodes, while a fractional value, a bool, a string or an out-of-int32 number
+// is rejected rather than truncated or counted as 1.
+func TestHyperlinkFetchParamFromSetupBudgetTypes(t *testing.T) {
+	p, err := hyperlinkParamFromSetup(schema.ParserSetup{
+		"max_urls": float64(7), "timeout_s": 3,
+	})
+	if err != nil {
+		t.Fatalf("integral values rejected: %v", err)
+	}
+	if p.MaxURLs != 7 || p.TimeoutSeconds != 3 {
+		t.Fatalf("parsed = %+v, want max_urls 7 and timeout_s 3", p)
+	}
+	for _, raw := range []any{3.5, true, "5", nil, math.MaxInt32 + 1.0} {
+		if _, err := hyperlinkParamFromSetup(schema.ParserSetup{"max_urls": raw}); err == nil {
+			t.Errorf("max_urls %v (%T) accepted, want rejection", raw, raw)
+		}
+	}
+	if _, err := hyperlinkParamFromSetup(schema.ParserSetup{"fetch_links": "yes"}); err == nil {
+		t.Error("fetch_links as a string accepted, want rejection")
 	}
 }

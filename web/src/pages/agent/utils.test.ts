@@ -5,6 +5,7 @@ import {
   transformApiConfigToForm,
   transformSavedParserConfigToForm,
 } from '@/utils/pipeline-operator';
+import { HyperlinkDefaultSetup } from './constant/pipeline';
 import { Operator } from './constant';
 import { FormSchema } from './form/parser-form/schema';
 import {
@@ -238,6 +239,57 @@ describe('transformParserParams vision settings', () => {
     // output_format is retired: the Go Parser normalizes every family to
     // JSON, so a stored legacy value must never be written back.
     expect(result.image).not.toHaveProperty('output_format');
+  });
+});
+
+describe('transformParserParams linked-content settings', () => {
+  // Only the budgets: fetch_links is what each case sets or asserts.
+  const hyperlinkBudgets = {
+    max_urls: HyperlinkDefaultSetup.max_urls,
+    max_bytes_per_url: HyperlinkDefaultSetup.max_bytes_per_url,
+    max_total_bytes: HyperlinkDefaultSetup.max_total_bytes,
+    timeout_s: HyperlinkDefaultSetup.timeout_s,
+  };
+
+  it.each([FileType.PDF, FileType.Docx])(
+    'emits budgets without collect_markdown_links for %s',
+    (fileFormat) => {
+      const result: Record<string, any> = transformParserParams({
+        setups: [{ fileFormat, fetch_links: true }],
+      } as any);
+
+      expect(result[fileFormat]).toMatchObject({
+        fetch_links: true,
+        ...hyperlinkBudgets,
+      });
+      expect(result[fileFormat]).not.toHaveProperty('collect_markdown_links');
+    },
+  );
+
+  it('emits collect_markdown_links for markdown', () => {
+    const result: Record<string, any> = transformParserParams({
+      setups: [
+        {
+          fileFormat: FileType.TextMarkdown,
+          fetch_links: true,
+          collect_markdown_links: true,
+        },
+      ],
+    } as any);
+
+    expect(result.markdown).toMatchObject({
+      fetch_links: true,
+      collect_markdown_links: true,
+      ...hyperlinkBudgets,
+    });
+  });
+
+  it('drops linked-content keys for doc', () => {
+    const result: Record<string, any> = transformParserParams({
+      setups: [{ fileFormat: FileType.Doc, fetch_links: true }],
+    } as any);
+
+    expect(result.doc).not.toHaveProperty('fetch_links');
   });
 });
 

@@ -10,6 +10,7 @@ import {
   TcadpFormFields,
   TwoColumnCheckFormField,
 } from './common-form-fields';
+import { HyperlinkFormFields } from './hyperlink-form-fields';
 import { CommonProps } from './interface';
 import { DynamicPageRange } from './dynamic-page-range';
 import { useSetInitialLanguage } from './use-set-initial-language';
@@ -43,6 +44,7 @@ export function PdfFormFields({ prefix }: CommonProps) {
 
       {languageShown && <LanguageFormField prefix={prefix}></LanguageFormField>}
       <TcadpFormFields prefix={prefix} />
+      <HyperlinkFormFields prefix={prefix} />
     </>
   );
 }

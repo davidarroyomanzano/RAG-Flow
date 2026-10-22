@@ -79,6 +79,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -115,6 +117,10 @@ type ParserComponent struct {
 	setups                  map[string]schema.ParserSetup
 	enableVisionEnhancement bool
 	vision                  visionSettings
+	// hyperlinkParams holds the linked-content budgets Check validated, keyed
+	// by family. Populating it here is what makes one document's run read the
+	// config it was compiled with instead of re-parsing the setup map.
+	hyperlinkParams map[string]schema.HyperlinkFetchParam
 }
 
 // visionSettings carries the global vision-enhancement choices. They sit at the
@@ -141,8 +147,14 @@ type visionSettings struct {
 //	  "vlm":                  {"llm_id": string, "system_prompt": string},
 //	  "pdf":                  map[string]any,
 //	  "docx":                 map[string]any,
+//	  "markdown":             map[string]any,
 //	  ...
 //	}
+//
+// The pdf, docx and markdown families accept the opt-in hyperlink
+// switches fetch_links (+ collect_markdown_links on markdown) with
+// max_urls/max_bytes_per_url/max_total_bytes/timeout_s budgets (#21032).
+// Any of those keys elsewhere is rejected by Check.
 //
 // Errors here surface as canvas compile failures so a malformed
 // param is caught at build time rather than mid-run.
@@ -185,6 +197,13 @@ func NewParserComponent(params map[string]any) (runtime.Component, error) {
 	for k, raw := range params {
 		if k == "outputs" || k == "allowed_output_format" || k == "enable_vision_enhancement" || k == "vlm" {
 			continue
+		}
+		// A hyperlink switch sitting at the params root is a misplaced setting:
+		// it would never reach a family setup, whatever shape it arrives in.
+		// Checked before the map branch below, because a map value would
+		// otherwise be absorbed as a file-format family named "max_urls".
+		if slices.Contains(hyperlinkSetupKeys, k) {
+			return nil, fmt.Errorf("parser: %q must be set inside a file-format setup, not at the top level", k)
 		}
 		ftCfg, ok := raw.(map[string]any)
 		if !ok {
@@ -249,6 +268,81 @@ func cloneParserSetupValue(value any) any {
 	}
 }
 
+// hyperlinkSetupKeys is the setup-key set the linked-content ingestion owns.
+// Families outside hyperlinkTargetCollectors must not carry any of them, and
+// none may sit at the params root (#21032).
+var hyperlinkSetupKeys = []string{
+	"fetch_links",
+	"collect_markdown_links",
+	"max_urls",
+	"max_bytes_per_url",
+	"max_total_bytes",
+	"timeout_s",
+}
+
+// hyperlinkParamFromSetup overlays one family's setup onto the param defaults.
+// Unlike the chunker params' Update, an unusable type is an error rather than a
+// silent ignore: these values bound how much the Parser downloads, so a canvas
+// that misconfigures them must fail to compile. Errors are returned unprefixed
+// so Check can name the family they came from.
+func hyperlinkParamFromSetup(setup schema.ParserSetup) (schema.HyperlinkFetchParam, error) {
+	p := schema.HyperlinkFetchParam{}.Defaults()
+	if raw, exists := setup["fetch_links"]; exists {
+		v, ok := raw.(bool)
+		if !ok {
+			return p, fmt.Errorf("field %q has invalid value %v: want a boolean", "fetch_links", raw)
+		}
+		p.FetchLinks = v
+	}
+	if raw, exists := setup["collect_markdown_links"]; exists {
+		v, ok := raw.(bool)
+		if !ok {
+			return p, fmt.Errorf("field %q has invalid value %v: want a boolean", "collect_markdown_links", raw)
+		}
+		p.CollectMarkdownLinks = v
+	}
+	if raw, exists := setup["max_urls"]; exists {
+		v, ok := hyperlinkBudget(raw)
+		if !ok {
+			return p, fmt.Errorf("field %q has invalid value %v: want a whole number", "max_urls", raw)
+		}
+		p.MaxURLs = v
+	}
+	if raw, exists := setup["max_bytes_per_url"]; exists {
+		v, ok := hyperlinkBudget(raw)
+		if !ok {
+			return p, fmt.Errorf("field %q has invalid value %v: want a whole number", "max_bytes_per_url", raw)
+		}
+		p.MaxBytesPerURL = v
+	}
+	if raw, exists := setup["max_total_bytes"]; exists {
+		v, ok := hyperlinkBudget(raw)
+		if !ok {
+			return p, fmt.Errorf("field %q has invalid value %v: want a whole number", "max_total_bytes", raw)
+		}
+		p.MaxTotalBytes = v
+	}
+	if raw, exists := setup["timeout_s"]; exists {
+		v, ok := hyperlinkBudget(raw)
+		if !ok {
+			return p, fmt.Errorf("field %q has invalid value %v: want a whole number", "timeout_s", raw)
+		}
+		p.TimeoutSeconds = v
+	}
+	return p, p.Validate()
+}
+
+// hyperlinkBudget accepts a JSON number that is a whole int32, rejecting a
+// fractional value, a bool or a string instead of truncating it or counting it
+// as 1.
+func hyperlinkBudget(raw any) (int, bool) {
+	v, ok := schema.NumericFromAny(raw)
+	if !ok || v != math.Trunc(v) || v < math.MinInt32 || v > math.MaxInt32 {
+		return 0, false
+	}
+	return int(v), true
+}
+
 // Check validates parser methods at construction time so a malformed DSL
 // surfaces as a canvas compile failure rather than a mid-run error.
 //
@@ -293,6 +387,33 @@ func (c *ParserComponent) Check() error {
 			return errors.New("parser: image has no text source: OCR is off and vision enhancement is disabled")
 		}
 	}
+	// Hyperlink switches live under the families in hyperlinkTargetCollectors
+	// only; the same keys anywhere else are rejected so a misplaced setting
+	// cannot silently do nothing (#20139 class). This is also where the
+	// validated per-family budgets are cached, so a run reads the configuration
+	// it was compiled with instead of re-parsing the setup map (#21032).
+	hyperlinkParams := make(map[string]schema.HyperlinkFetchParam, len(hyperlinkTargetCollectors))
+	for family, setup := range c.setups {
+		if _, ok := hyperlinkTargetCollectors[family]; ok {
+			if family != "markdown" {
+				if _, exists := setup["collect_markdown_links"]; exists {
+					return fmt.Errorf("parser: %s has no hyperlink parameter %q", family, "collect_markdown_links")
+				}
+			}
+			param, err := hyperlinkParamFromSetup(setup)
+			if err != nil {
+				return fmt.Errorf("parser: %s %w", family, err)
+			}
+			hyperlinkParams[family] = param
+			continue
+		}
+		for _, key := range hyperlinkSetupKeys {
+			if _, exists := setup[key]; exists {
+				return fmt.Errorf("parser: %s has no hyperlink parameter %q", family, key)
+			}
+		}
+	}
+	c.hyperlinkParams = hyperlinkParams
 	return nil
 }
 
@@ -320,6 +441,11 @@ func defaultSetups() map[string]schema.ParserSetup {
 			"flatten_media_to_text": false,
 			"remove_toc":            false,
 			"remove_header_footer":  false,
+			"fetch_links":           false,
+			"max_urls":              5,
+			"max_bytes_per_url":     1 << 20,
+			"max_total_bytes":       5 << 20,
+			"timeout_s":             10,
 			"suffix":                []string{"pdf"},
 		},
 		"spreadsheet": {
@@ -337,12 +463,23 @@ func defaultSetups() map[string]schema.ParserSetup {
 			"flatten_media_to_text": false,
 			"remove_toc":            false,
 			"remove_header_footer":  false,
+			"fetch_links":           false,
+			"max_urls":              5,
+			"max_bytes_per_url":     1 << 20,
+			"max_total_bytes":       5 << 20,
+			"timeout_s":             10,
 			"suffix":                []string{"docx"},
 		},
 		"markdown": {
-			"flatten_media_to_text": false,
-			"suffix":                []string{"md", "markdown", "mdx"},
-			"remove_toc":            false,
+			"flatten_media_to_text":  false,
+			"suffix":                 []string{"md", "markdown", "mdx"},
+			"remove_toc":             false,
+			"fetch_links":            false,
+			"collect_markdown_links": false,
+			"max_urls":               5,
+			"max_bytes_per_url":      1 << 20,
+			"max_total_bytes":        5 << 20,
+			"timeout_s":              10,
 		},
 		"text&code": {
 			"suffix": []string{
@@ -577,6 +714,19 @@ func (c *ParserComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[st
 	}
 	lang, _ := getString(inputs, "lang")
 	out := buildParserOutputs(ctx, dispatched, filename, binary, lang)
+	// Opt-in linked-content ingestion (#21032): the parent result is final;
+	// fetched pages are parsed as plain HTML and appended after the parent
+	// items. Failures are warnings only, never run errors.
+	if items, ok := out["json"].([]parser.DocItem); ok {
+		fetched, linkWarnings := c.fetchHyperlinkedContent(ctx, fileTypeExt, filename, binary, items, docID)
+		out["json"] = fetched
+		reportParserWarnings(ctx, linkWarnings)
+	}
+	// Linked fetching degrades to warnings on per-URL failures, but a run
+	// cancelled mid-fetch must still fail instead of being reported done.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("parser: %w", err)
+	}
 	out["file_type"] = string(fileTypeExt)
 	// Forward the storage references so a downstream chunker can
 	// re-acquire the source PDF and crop section images on demand,
